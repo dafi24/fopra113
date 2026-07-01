@@ -1,8 +1,40 @@
 from pathlib import Path
 
+import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import curve_fit
+
+
+WL_DATASET_CANDIDATES = (
+    "wavelength_scan.wl",
+    "wavelength_scan.WL",
+    "wavelength_scan.wavelength",
+)
+RR_DATASET_CANDIDATES = (
+    "wavelength_scan.RR.mean",
+    "wavelength_scan.rr.mean",
+    "wavelength_scan.relative_reflection.mean",
+    "wavelength_scan.RelativeReflection.mean",
+)
+R_DATASET_CANDIDATES = (
+    "wavelength_scan.R.mean",
+    "wavelength_scan.r.mean",
+    "wavelength_scan.reflection.mean",
+)
+E_DATASET_CANDIDATES = (
+    "wavelength_scan.E.mean",
+    "wavelength_scan.e.mean",
+    "wavelength_scan.excitation.mean",
+)
+S_DATASET_CANDIDATES = (
+    "wavelength_scan.S.mean",
+    "wavelength_scan.s.mean",
+)
+STRUCTURE_DATASET_CANDIDATES = (
+    "wavelength_scan.structure_string",
+    "wavelength_scan.structure",
+)
 
 
 def clean_sample_name(sample):
@@ -53,6 +85,116 @@ def find_measurement_file(measurement_number, data_root=".", suffix="-FoPraWavel
         f"Could not find {wanted} below {data_root}. "
         "Use --data-root or --file to point at the measurement file."
     )
+
+
+def _first_existing_dataset(group, candidates):
+    for key in candidates:
+        if key in group:
+            return key, np.asarray(group[key])
+    return None, None
+
+
+def _find_dataset_ending(group, endings):
+    lower_endings = tuple(ending.lower() for ending in endings)
+    for key in group.keys():
+        if key.lower().endswith(lower_endings):
+            return key, np.asarray(group[key])
+    return None, None
+
+
+def _scalar_string(value, fallback):
+    try:
+        array = np.asarray(value)
+        if array.shape == ():
+            value = array.item()
+        elif array.size > 0:
+            value = array.flat[0]
+    except Exception:
+        return fallback
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def open_h5_robust(path):
+    """Open a FoPra wavelength-scan HDF5 file using all known dataset variants.
+
+    Some uploaded scans do not contain ``wavelength_scan.RR.mean``. Older or
+    reference scans may only contain ``wavelength_scan.S.mean`` or separate
+    reflected/excitation channels. This reader keeps the automatic batch script
+    from crashing on those files:
+
+    1. prefer a precomputed relative-reflection dataset, if present;
+    2. otherwise compute R/E when both channels are available;
+    3. otherwise fall back to S.mean.
+    """
+    path = Path(path)
+    with h5py.File(path, "r") as fh:
+        if "datasets" not in fh:
+            raise KeyError(f"{path} has no 'datasets' group.")
+        datasets = fh["datasets"]
+        available = sorted(datasets.keys())
+
+        wl_key, WL = _first_existing_dataset(datasets, WL_DATASET_CANDIDATES)
+        if WL is None:
+            wl_key, WL = _find_dataset_ending(datasets, (".wl", ".wavelength"))
+        if WL is None:
+            raise KeyError(
+                f"{path} has no recognized wavelength dataset. Available datasets: {available}"
+            )
+
+        signal_key, signal = _first_existing_dataset(datasets, RR_DATASET_CANDIDATES)
+        if signal is None:
+            signal_key, signal = _find_dataset_ending(datasets, (".rr.mean", ".relative_reflection.mean"))
+
+        if signal is None:
+            r_key, reflected = _first_existing_dataset(datasets, R_DATASET_CANDIDATES)
+            e_key, excitation = _first_existing_dataset(datasets, E_DATASET_CANDIDATES)
+            if reflected is not None and excitation is not None:
+                n = min(len(reflected), len(excitation))
+                reflected = np.asarray(reflected[:n], dtype=float)
+                excitation = np.asarray(excitation[:n], dtype=float)
+                if np.any(np.isclose(excitation, 0.0)):
+                    raise ZeroDivisionError(f"{path}: excitation channel {e_key} contains zero values.")
+                signal = np.abs(reflected) / np.abs(excitation)
+                signal_key = f"abs({r_key})/abs({e_key})"
+
+        if signal is None:
+            signal_key, signal = _first_existing_dataset(datasets, S_DATASET_CANDIDATES)
+        if signal is None:
+            signal_key, signal = _find_dataset_ending(datasets, (".s.mean", ".r.mean"))
+
+        if signal is None:
+            raise KeyError(
+                f"{path} has no recognized reflection signal dataset. Available datasets: {available}"
+            )
+
+        sample_key, sample_value = _first_existing_dataset(datasets, STRUCTURE_DATASET_CANDIDATES)
+        sample = _scalar_string(sample_value, path.stem) if sample_value is not None else path.stem
+
+    WL = np.asarray(WL, dtype=float).reshape(-1)
+    signal = np.asarray(signal, dtype=float).reshape(-1)
+    n_points = min(WL.size, signal.size)
+    WL = WL[:n_points]
+    signal = signal[:n_points]
+
+    # Preserve the behavior of the original analysis script, which discarded
+    # the final wavelength/signal point from Artiq wavelength scans.
+    if n_points > 1:
+        WL = WL[:-1]
+        signal = signal[:-1]
+
+    print(f"Loaded {path.name}: wavelength={wl_key}, signal={signal_key}")
+    return WL, signal, sample
+
+
+def supports_wavelength_scan(path):
+    """Return (True, '') when open_h5_robust can read the scan, else (False, reason)."""
+    try:
+        open_h5_robust(path)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _odd_window(window, length):

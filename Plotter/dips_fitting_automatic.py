@@ -3,15 +3,12 @@
 This is a convenience wrapper around ``plotter.py``. It recursively finds all
 ``*-FoPraWavelengthScan.h5`` files in the repository/data root, skips the mirror
 calibration scan by default, and launches the calibrated fitting workflow for
-all remaining scans in one command.
+all remaining readable scans in one command.
 
-Typical usage from the repository root:
+Typical usage from the repository root or from Plotter/:
 
     python Plotter/dips_fitting_automatic.py
-
-Use a different mirror scan:
-
-    python Plotter/dips_fitting_automatic.py --calibration-measurement 50420
+    python3 dips_fitting_automatic.py
 
 Run only selected structure scans:
 
@@ -23,6 +20,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from calibration import open_h5_robust
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -74,6 +73,14 @@ def resolve_calibration_file(scans, calibration_measurement, calibration_file):
     return matches[0], calibration_measurement
 
 
+def validate_scan(path):
+    try:
+        open_h5_robust(path)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
 def build_plotter_command(args, measurement, scan_path, calibration_path):
     cmd = [
         sys.executable,
@@ -108,7 +115,7 @@ def build_plotter_command(args, measurement, scan_path, calibration_path):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run calibrated FoPra dip fitting for all wavelength-scan HDF5 files."
+        description="Run calibrated FoPra dip fitting for all readable wavelength-scan HDF5 files."
     )
     parser.add_argument(
         "--data-root",
@@ -134,7 +141,7 @@ def parse_args():
         "--measurements",
         nargs="*",
         default=None,
-        help="Optional list of structure measurement numbers to fit. If omitted, fit all scans except calibration.",
+        help="Optional list of structure measurement numbers to fit. If omitted, fit all readable scans except calibration.",
     )
     parser.add_argument(
         "--include-calibration-scan",
@@ -179,23 +186,36 @@ def main():
         args.calibration_measurement,
         args.calibration_file,
     )
+    calibration_ok, calibration_reason = validate_scan(calibration_path)
+    if not calibration_ok:
+        raise RuntimeError(f"Mirror calibration file is not readable: {calibration_reason}")
 
     selected_measurements = None
     if args.measurements:
         selected_measurements = {normalize_measurement_number(item) for item in args.measurements}
 
     jobs = []
+    skipped = []
     for measurement, scan_path in scans:
         if selected_measurements is not None and measurement not in selected_measurements:
             continue
         if not args.include_calibration_scan and calibration_measurement == measurement:
+            skipped.append((measurement, scan_path, "calibration scan"))
+            continue
+        ok, reason = validate_scan(scan_path)
+        if not ok:
+            skipped.append((measurement, scan_path, reason))
             continue
         jobs.append((measurement, scan_path))
 
     print(f"Data root: {args.data_root}")
     print(f"Output directory: {args.output_dir}")
     print(f"Mirror calibration file: {calibration_path}")
-    print(f"Queued {len(jobs)} structure scans for calibrated fitting.")
+    print(f"Queued {len(jobs)} readable structure scans for calibrated fitting.")
+    if skipped:
+        print("Skipped scans:")
+        for measurement, scan_path, reason in skipped:
+            print(f"  {measurement}: {scan_path} ({reason})")
 
     failures = []
     for index, (measurement, scan_path) in enumerate(jobs, start=1):

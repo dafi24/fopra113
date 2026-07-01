@@ -7,12 +7,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from test_callback import SelectiveFitter, assign_filename
-from functions_double import Pixner_fit, detect_peaks, open_h5
+from functions_double import Pixner_fit, detect_peaks
 from calibration import (
     apply_mirror_calibration,
     clean_sample_name,
     find_measurement_file,
     normalize_measurement_number,
+    open_h5_robust,
 )
 
 # Defaults chosen for the repository layout uploaded with the FoPra data.
@@ -164,7 +165,7 @@ def main():
 
     measurement_number = normalize_measurement_number(args.measurement)
     data_path = resolve_measurement_path(measurement_number, args.file, data_root)
-    WL, RR_raw, sample_nr = open_h5(data_path)
+    WL, RR_raw, sample_nr = open_h5_robust(data_path)
     sample_name = clean_sample_name(sample_nr)
 
     print("Sample number:", sample_nr)
@@ -198,7 +199,7 @@ def main():
         else:
             calibration_path = resolve_measurement_path(calibration_number, args.calibration_file, data_root)
             print("Mirror calibration data:", calibration_path)
-            mirror_WL, mirror_RR, mirror_sample = open_h5(calibration_path)
+            mirror_WL, mirror_RR, mirror_sample = open_h5_robust(calibration_path)
             RR, calibration_curve, calibration_params = apply_mirror_calibration(
                 WL,
                 RR_raw,
