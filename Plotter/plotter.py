@@ -14,6 +14,7 @@ from calibration import (
     apply_mirror_calibration,
     clean_sample_name,
     find_measurement_file,
+    moving_average,
     normalize_measurement_number,
     open_h5_robust,
 )
@@ -102,20 +103,56 @@ def parse_args():
     parser.add_argument(
         "--prominence",
         type=float,
-        default=0.02,
-        help="Prominence passed to scipy.signal.find_peaks after normalization. Increase for noisier data.",
+        default=0.08,
+        help=(
+            "Prominence passed to scipy.signal.find_peaks after normalization. "
+            "The default is intentionally stricter than the old 0.02 to avoid fitting noise."
+        ),
     )
     parser.add_argument(
         "--distance",
         type=int,
         default=200,
-        help="Minimum distance, in data points, between detected dips.",
+        help="Minimum distance, in data points, between initially detected dips.",
     )
     parser.add_argument(
         "--window-nm",
         type=float,
         default=0.5,
-        help="Half-width of the fitting window around each detected dip in nm.",
+        help="Half-width of the fitting window around each accepted dip in nm.",
+    )
+    parser.add_argument(
+        "--detection-smooth-window",
+        type=int,
+        default=11,
+        help="Moving-average window, in points, applied only before dip detection. Use 1 to disable.",
+    )
+    parser.add_argument(
+        "--min-dip-depth-fraction",
+        type=float,
+        default=0.08,
+        help="Reject candidates whose local dip depth is below this fraction of the local baseline.",
+    )
+    parser.add_argument(
+        "--min-dip-depth-sigma",
+        type=float,
+        default=5.0,
+        help="Reject candidates whose local dip depth is less than this many robust noise sigmas.",
+    )
+    parser.add_argument(
+        "--duplicate-merge-nm",
+        type=float,
+        default=0.35,
+        help=(
+            "Merge candidates whose actual local minima are closer than this wavelength spacing. "
+            "Close/split dips are then handled by the double-Lorentzian fitter in one window."
+        ),
+    )
+    parser.add_argument(
+        "--edge-reject-fraction",
+        type=float,
+        default=0.15,
+        help="Reject candidates whose local minimum lies this close to the fitting-window edge.",
     )
     parser.add_argument(
         "--calibration-smooth-window",
@@ -186,6 +223,179 @@ def plot_overview(WL, RR, title, save_path, dpi=300):
     return fig, ax, graph
 
 
+def robust_sigma(values):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return np.nan
+    median = np.nanmedian(values)
+    mad = np.nanmedian(np.abs(values - median))
+    if mad > 0:
+        return 1.4826 * mad
+    return np.nanstd(values)
+
+
+def smooth_for_detection(RR, window):
+    if window is None or window <= 1:
+        return np.asarray(RR, dtype=float).copy()
+    return moving_average(RR, window)
+
+
+def characterize_dip_candidate(WL, RR, candidate_idx, window_nm, edge_reject_fraction):
+    center_wl = float(WL[candidate_idx])
+    mask = (WL >= center_wl - window_nm) & (WL <= center_wl + window_nm)
+    if np.count_nonzero(mask) < 10:
+        return None, "too_few_points"
+
+    local_wl = np.asarray(WL[mask], dtype=float)
+    local_rr = np.asarray(RR[mask], dtype=float)
+    finite = np.isfinite(local_wl) & np.isfinite(local_rr)
+    local_wl = local_wl[finite]
+    local_rr = local_rr[finite]
+    if local_wl.size < 10:
+        return None, "too_few_finite_points"
+
+    min_pos = int(np.nanargmin(local_rr))
+    min_wl = float(local_wl[min_pos])
+    min_rr = float(local_rr[min_pos])
+
+    edge_points = max(3, int(0.20 * local_rr.size))
+    edge_values = np.concatenate((local_rr[:edge_points], local_rr[-edge_points:]))
+    baseline = float(np.nanmedian(edge_values))
+    noise = robust_sigma(np.diff(local_rr)) / np.sqrt(2.0)
+    if not np.isfinite(noise) or noise <= 0:
+        noise = robust_sigma(edge_values)
+    if not np.isfinite(noise) or noise <= 0:
+        noise = 1e-12
+
+    depth = baseline - min_rr
+    depth_fraction = depth / max(abs(baseline), 1e-12)
+    edge_distance = min(min_wl - float(local_wl[0]), float(local_wl[-1]) - min_wl)
+    edge_margin = max(0.0, edge_reject_fraction) * (2.0 * window_nm)
+
+    info = {
+        "candidate_idx": int(candidate_idx),
+        "candidate_wl": center_wl,
+        "fit_center_wl": min_wl,
+        "fit_center_idx": int(np.argmin(np.abs(WL - min_wl))),
+        "min_rr": min_rr,
+        "baseline": baseline,
+        "depth": float(depth),
+        "depth_fraction": float(depth_fraction),
+        "noise": float(noise),
+        "depth_sigma": float(depth / noise),
+        "edge_distance_nm": float(edge_distance),
+        "window_start_nm": float(local_wl[0]),
+        "window_end_nm": float(local_wl[-1]),
+    }
+
+    if depth <= 0:
+        return info, "not_a_dip"
+    if edge_distance < edge_margin:
+        return info, "minimum_at_window_edge"
+    return info, "ok"
+
+
+def select_dip_candidates(WL, RR, raw_peak_indices, args):
+    """Filter initial dip detections and merge duplicates around the same minimum.
+
+    The initial peak finder can trigger on noise or on many nearby samples around
+    one deep resonance. This pass keeps only locally deep dips and collapses all
+    candidates that point to the same actual minimum. Close double/split peaks
+    are still fitted in one wider window by ``Pixner_fit``.
+    """
+    accepted = []
+    rejected = []
+    for idx in raw_peak_indices:
+        info, reason = characterize_dip_candidate(
+            WL,
+            RR,
+            int(idx),
+            window_nm=args.window_nm,
+            edge_reject_fraction=args.edge_reject_fraction,
+        )
+        if info is None:
+            rejected.append({"candidate_idx": int(idx), "candidate_wl": float(WL[int(idx)]), "reason": reason})
+            continue
+
+        if reason != "ok":
+            info["reason"] = reason
+            rejected.append(info)
+            continue
+        if info["depth_fraction"] < args.min_dip_depth_fraction:
+            info["reason"] = "too_shallow_fraction"
+            rejected.append(info)
+            continue
+        if info["depth_sigma"] < args.min_dip_depth_sigma:
+            info["reason"] = "too_shallow_vs_noise"
+            rejected.append(info)
+            continue
+        info["reason"] = "accepted"
+        accepted.append(info)
+
+    if not accepted:
+        return [], rejected
+
+    accepted = sorted(accepted, key=lambda item: item["fit_center_wl"])
+    groups = []
+    for info in accepted:
+        if not groups:
+            groups.append([info])
+            continue
+        group_center = np.nanmedian([item["fit_center_wl"] for item in groups[-1]])
+        if abs(info["fit_center_wl"] - group_center) <= args.duplicate_merge_nm:
+            groups[-1].append(info)
+        else:
+            groups.append([info])
+
+    selected = []
+    for group in groups:
+        best = max(group, key=lambda item: (item["depth_fraction"], item["depth_sigma"]))
+        best = dict(best)
+        best["duplicates_merged"] = len(group) - 1
+        if len(group) > 1:
+            best["merged_candidate_wavelengths"] = ",".join(f"{item['candidate_wl']:.6f}" for item in group)
+            for duplicate in group:
+                if duplicate is best:
+                    continue
+                duplicate = dict(duplicate)
+                duplicate["reason"] = f"duplicate_of_{best['fit_center_wl']:.6f}"
+                rejected.append(duplicate)
+        selected.append(best)
+
+    return sorted(selected, key=lambda item: item["fit_center_wl"]), rejected
+
+
+def write_peak_selection_log(output_dir, selected, rejected):
+    fields = [
+        "reason",
+        "candidate_idx",
+        "candidate_wl",
+        "fit_center_wl",
+        "min_rr",
+        "baseline",
+        "depth",
+        "depth_fraction",
+        "noise",
+        "depth_sigma",
+        "edge_distance_nm",
+        "duplicates_merged",
+        "merged_candidate_wavelengths",
+    ]
+    path = output_dir / "peak_selection_log.tsv"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("status\t" + "\t".join(fields) + "\n")
+        for status, rows in (("selected", selected), ("rejected", rejected)):
+            for row in rows:
+                values = []
+                for field in fields:
+                    value = row.get(field, "")
+                    if isinstance(value, float):
+                        value = f"{value:.8g}"
+                    values.append(str(value))
+                f.write(status + "\t" + "\t".join(values) + "\n")
+
+
 def write_processing_config(output_dir, args, data_path, calibration_path, calibration_params):
     with open(output_dir / "processing_config.txt", "w", encoding="utf-8") as f:
         f.write(f"structure_measurement: {args.measurement}\n")
@@ -196,6 +406,11 @@ def write_processing_config(output_dir, args, data_path, calibration_path, calib
         f.write(f"prominence: {args.prominence}\n")
         f.write(f"distance: {args.distance}\n")
         f.write(f"window_nm: {args.window_nm}\n")
+        f.write(f"detection_smooth_window: {args.detection_smooth_window}\n")
+        f.write(f"min_dip_depth_fraction: {args.min_dip_depth_fraction}\n")
+        f.write(f"min_dip_depth_sigma: {args.min_dip_depth_sigma}\n")
+        f.write(f"duplicate_merge_nm: {args.duplicate_merge_nm}\n")
+        f.write(f"edge_reject_fraction: {args.edge_reject_fraction}\n")
         f.write(f"calibration_smooth_window: {args.calibration_smooth_window}\n")
         f.write(f"min_calibration_period_factor: {args.min_calibration_period_factor}\n")
         f.write(f"max_calibration_period_factor: {args.max_calibration_period_factor}\n")
@@ -305,17 +520,32 @@ def main():
 
     # %% Automated Peak Detection and Fitting
     print("\n--- Starting Automated Fitting ---")
-    peak_indices = detect_peaks(RR, find_dips=True, prominence=args.prominence, distance=args.distance)
-    print(f"Found {len(peak_indices)} dips. Proceeding to fit...")
+    RR_for_detection = smooth_for_detection(RR, args.detection_smooth_window)
+    raw_peak_indices = detect_peaks(
+        RR_for_detection,
+        find_dips=True,
+        prominence=args.prominence,
+        distance=args.distance,
+    )
+    selected_peaks, rejected_peaks = select_dip_candidates(WL, RR, raw_peak_indices, args)
+    write_peak_selection_log(output_dir, selected_peaks, rejected_peaks)
+    print(
+        f"Initial dip candidates: {len(raw_peak_indices)}; "
+        f"accepted after depth/duplicate filtering: {len(selected_peaks)}; "
+        f"rejected: {len(rejected_peaks)}."
+    )
+    print(f"Peak selection details: {output_dir / 'peak_selection_log.tsv'}")
 
     modified_sample_nr = f"{sample_name}_{measurement_number}"
     fit_save_path = str(output_root) + os.sep
     failed_peaks = []
 
-    for counter, idx in enumerate(peak_indices):
-        f_guess = WL[idx]
+    for counter, peak in enumerate(selected_peaks):
+        f_guess = peak["fit_center_wl"]
         f_range = [f_guess - args.window_nm, f_guess + args.window_nm]
-        print(f"\nFitting peak #{counter} at ~{f_guess:.2f} nm...")
+        merged = peak.get("duplicates_merged", 0)
+        merge_note = f" (merged {merged} duplicate candidates)" if merged else ""
+        print(f"\nFitting peak #{counter} at ~{f_guess:.2f} nm{merge_note}...")
         try:
             Pixner_fit(
                 f_guess=f_guess,

@@ -102,6 +102,16 @@ def build_plotter_command(args, measurement, scan_path, calibration_path):
         str(args.distance),
         "--window-nm",
         str(args.window_nm),
+        "--detection-smooth-window",
+        str(args.detection_smooth_window),
+        "--min-dip-depth-fraction",
+        str(args.min_dip_depth_fraction),
+        "--min-dip-depth-sigma",
+        str(args.min_dip_depth_sigma),
+        "--duplicate-merge-nm",
+        str(args.duplicate_merge_nm),
+        "--edge-reject-fraction",
+        str(args.edge_reject_fraction),
         "--calibration-smooth-window",
         str(args.calibration_smooth_window),
         "--min-calibration-period-factor",
@@ -181,9 +191,14 @@ def parse_args():
         action="store_true",
         help="Forward --keep-existing to plotter.py, so old output folders are not removed first.",
     )
-    parser.add_argument("--prominence", type=float, default=0.02)
+    parser.add_argument("--prominence", type=float, default=0.08)
     parser.add_argument("--distance", type=int, default=200)
     parser.add_argument("--window-nm", type=float, default=0.5)
+    parser.add_argument("--detection-smooth-window", type=int, default=11)
+    parser.add_argument("--min-dip-depth-fraction", type=float, default=0.08)
+    parser.add_argument("--min-dip-depth-sigma", type=float, default=5.0)
+    parser.add_argument("--duplicate-merge-nm", type=float, default=0.35)
+    parser.add_argument("--edge-reject-fraction", type=float, default=0.15)
     parser.add_argument("--calibration-smooth-window", type=int, default=401)
     parser.add_argument("--min-calibration-period-factor", type=float, default=0.75)
     parser.add_argument("--max-calibration-period-factor", type=float, default=4.0)
