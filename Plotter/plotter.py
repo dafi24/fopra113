@@ -1,10 +1,12 @@
 import argparse
 import os
 import shutil
+import traceback
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 
 from test_callback import SelectiveFitter, assign_filename
 from functions_double import Pixner_fit, detect_peaks
@@ -27,6 +29,29 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_DATA_ROOT = REPO_ROOT
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "Plots"
+_ORIGINAL_SAVEFIG = Figure.savefig
+
+
+def cap_matplotlib_savefig_dpi(max_dpi):
+    """Cap explicit savefig DPI values used inside legacy fitting functions.
+
+    ``functions_double.Pixner_fit`` hard-codes ``dpi=600`` for every individual
+    dip plot. In batch mode this can consume a lot of memory and can get the
+    Python process killed by the OS. This wrapper keeps the output plots but
+    limits their resolution to a safer value.
+    """
+    if max_dpi is None or max_dpi <= 0:
+        return
+
+    max_dpi = int(max_dpi)
+
+    def capped_savefig(self, *args, **kwargs):
+        dpi = kwargs.get("dpi")
+        if isinstance(dpi, (int, float)) and dpi > max_dpi:
+            kwargs["dpi"] = max_dpi
+        return _ORIGINAL_SAVEFIG(self, *args, **kwargs)
+
+    Figure.savefig = capped_savefig
 
 
 def parse_args():
@@ -111,6 +136,28 @@ def parse_args():
         help="Upper bound for the sine period as a fraction of the mirror wavelength span.",
     )
     parser.add_argument(
+        "--overview-dpi",
+        type=int,
+        default=300,
+        help="DPI for overview plots. Lower than the old 1200 dpi default to avoid batch memory spikes.",
+    )
+    parser.add_argument(
+        "--fit-plot-dpi",
+        type=int,
+        default=200,
+        help="Maximum DPI for individual fit plots saved by legacy fitting code. Use <=0 to disable capping.",
+    )
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Disable the interactive SelectiveFitter callback and close overview figures after saving.",
+    )
+    parser.add_argument(
+        "--stop-on-fit-error",
+        action="store_true",
+        help="Stop the measurement when one dip fit fails. By default failed dip fits are logged and skipped.",
+    )
+    parser.add_argument(
         "--keep-existing",
         action="store_true",
         help="Do not delete an existing output folder before processing.",
@@ -127,7 +174,7 @@ def resolve_measurement_path(measurement, direct_file, data_root):
     return find_measurement_file(measurement, data_root=data_root)
 
 
-def plot_overview(WL, RR, title, save_path):
+def plot_overview(WL, RR, title, save_path, dpi=300):
     fig = plt.figure(num=None, figsize=(10, 4))
     ax = fig.add_subplot(111)
     graph, = ax.plot(WL, RR, ".")
@@ -135,7 +182,7 @@ def plot_overview(WL, RR, title, save_path):
     ax.set_ylabel("Relative reflection [-]")
     ax.set_xlabel("Wavelength [nm]")
     fig.tight_layout()
-    fig.savefig(save_path, dpi=1200)
+    fig.savefig(save_path, dpi=dpi)
     return fig, ax, graph
 
 
@@ -152,16 +199,28 @@ def write_processing_config(output_dir, args, data_path, calibration_path, calib
         f.write(f"calibration_smooth_window: {args.calibration_smooth_window}\n")
         f.write(f"min_calibration_period_factor: {args.min_calibration_period_factor}\n")
         f.write(f"max_calibration_period_factor: {args.max_calibration_period_factor}\n")
+        f.write(f"overview_dpi: {args.overview_dpi}\n")
+        f.write(f"fit_plot_dpi: {args.fit_plot_dpi}\n")
         if calibration_params:
             f.write("\n[mirror_sine_calibration]\n")
             for key, value in calibration_params.items():
                 f.write(f"{key}: {value}\n")
 
 
+def append_failed_peak(output_dir, counter, f_guess, f_range, exc):
+    log_path = output_dir / "failed_peak_fits.txt"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"Peak #{counter} at ~{f_guess:.6f} nm, range={f_range}\n")
+        f.write(f"{type(exc).__name__}: {exc}\n")
+        f.write(traceback.format_exc())
+        f.write("\n---\n")
+
+
 def main():
     args = parse_args()
     data_root = Path(args.data_root).expanduser().resolve()
     output_root = Path(args.output_dir).expanduser().resolve()
+    cap_matplotlib_savefig_dpi(args.fit_plot_dpi)
 
     measurement_number = normalize_measurement_number(args.measurement)
     data_path = resolve_measurement_path(measurement_number, args.file, data_root)
@@ -178,8 +237,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Always keep a raw overview to make the calibration step auditable.
-    plot_overview(WL, RR_raw, "Structure raw data", output_dir / f"plot_{sample_name}_raw.png")
-    plt.close("all")
+    raw_fig, _, _ = plot_overview(
+        WL,
+        RR_raw,
+        "Structure raw data",
+        output_dir / f"plot_{sample_name}_raw.png",
+        dpi=args.overview_dpi,
+    )
+    plt.close(raw_fig)
 
     RR = RR_raw.copy()
     calibration_path = None
@@ -219,12 +284,22 @@ def main():
     write_processing_config(output_dir, args, data_path, calibration_path, calibration_params)
 
     # Legacy overview file name now contains the calibrated data if calibration was enabled.
-    fig1, ax1, graph = plot_overview(WL, RR, "Structure", output_dir / f"plot_{sample_name}.png")
+    fig1, ax1, graph = plot_overview(
+        WL,
+        RR,
+        "Structure",
+        output_dir / f"plot_{sample_name}.png",
+        dpi=args.overview_dpi,
+    )
     if calibration_params is not None:
-        fig1.savefig(output_dir / f"plot_{sample_name}_calibrated.png", dpi=1200)
+        fig1.savefig(output_dir / f"plot_{sample_name}_calibrated.png", dpi=args.overview_dpi)
 
-    timestamp = assign_filename(str(output_dir), f"_ParamFile_{measurement_number}.txt")
-    selectivefitter = SelectiveFitter(graph, 0.7, timestamp)
+    if args.no_interactive:
+        selectivefitter = None
+        plt.close(fig1)
+    else:
+        timestamp = assign_filename(str(output_dir), f"_ParamFile_{measurement_number}.txt")
+        selectivefitter = SelectiveFitter(graph, 0.7, timestamp)
 
     print("Full save path:", output_dir / f"plot_{sample_name}.png")
 
@@ -235,20 +310,36 @@ def main():
 
     modified_sample_nr = f"{sample_name}_{measurement_number}"
     fit_save_path = str(output_root) + os.sep
+    failed_peaks = []
 
     for counter, idx in enumerate(peak_indices):
         f_guess = WL[idx]
         f_range = [f_guess - args.window_nm, f_guess + args.window_nm]
         print(f"\nFitting peak #{counter} at ~{f_guess:.2f} nm...")
-        Pixner_fit(
-            f_guess=f_guess,
-            WL=WL,
-            RR=RR,
-            sample_nr=modified_sample_nr,
-            save_path=fit_save_path,
-            counter=counter,
-            f_range=f_range,
-        )
+        try:
+            Pixner_fit(
+                f_guess=f_guess,
+                WL=WL,
+                RR=RR,
+                sample_nr=modified_sample_nr,
+                save_path=fit_save_path,
+                counter=counter,
+                f_range=f_range,
+            )
+        except Exception as exc:
+            failed_peaks.append((counter, f_guess, exc))
+            append_failed_peak(output_dir, counter, f_guess, f_range, exc)
+            print(f"Skipping peak #{counter} at ~{f_guess:.2f} nm after fit error: {exc}")
+            if args.stop_on_fit_error:
+                raise
+        finally:
+            # Close figures created by the legacy fit function even when the fit
+            # had low R^2 or failed midway. This prevents long batch runs from
+            # accumulating many open matplotlib figures and getting killed.
+            plt.close("all")
+
+    if failed_peaks:
+        print(f"\nSkipped {len(failed_peaks)} failed peak fits. See {output_dir / 'failed_peak_fits.txt'}")
 
     print("\n--- Automated Fitting Complete! ---")
 

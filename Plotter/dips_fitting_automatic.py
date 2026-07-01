@@ -16,6 +16,7 @@ Run only selected structure scans:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -107,9 +108,16 @@ def build_plotter_command(args, measurement, scan_path, calibration_path):
         str(args.min_calibration_period_factor),
         "--max-calibration-period-factor",
         str(args.max_calibration_period_factor),
+        "--overview-dpi",
+        str(args.overview_dpi),
+        "--fit-plot-dpi",
+        str(args.fit_plot_dpi),
+        "--no-interactive",
     ]
     if args.keep_existing:
         cmd.append("--keep-existing")
+    if args.stop_on_fit_error:
+        cmd.append("--stop-on-fit-error")
     return cmd
 
 
@@ -154,9 +162,19 @@ def parse_args():
         help="Print the plotter.py commands without executing them.",
     )
     parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop the batch when one measurement subprocess fails. By default failures are logged and the batch continues.",
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        help="Continue with the next scan if one fitting run fails.",
+        help="Deprecated compatibility flag; continuing is now the default.",
+    )
+    parser.add_argument(
+        "--stop-on-fit-error",
+        action="store_true",
+        help="Forward --stop-on-fit-error to plotter.py. By default individual failed peak fits are skipped.",
     )
     parser.add_argument(
         "--keep-existing",
@@ -169,6 +187,8 @@ def parse_args():
     parser.add_argument("--calibration-smooth-window", type=int, default=401)
     parser.add_argument("--min-calibration-period-factor", type=float, default=0.75)
     parser.add_argument("--max-calibration-period-factor", type=float, default=4.0)
+    parser.add_argument("--overview-dpi", type=int, default=300)
+    parser.add_argument("--fit-plot-dpi", type=int, default=200)
     return parser.parse_args()
 
 
@@ -217,6 +237,8 @@ def main():
         for measurement, scan_path, reason in skipped:
             print(f"  {measurement}: {scan_path} ({reason})")
 
+    env = os.environ.copy()
+    env.setdefault("MPLBACKEND", "Agg")
     failures = []
     for index, (measurement, scan_path) in enumerate(jobs, start=1):
         print(f"\n[{index}/{len(jobs)}] Fitting measurement {measurement}: {scan_path}")
@@ -225,22 +247,23 @@ def main():
         if args.dry_run:
             continue
 
-        completed = subprocess.run(cmd, cwd=str(REPO_ROOT))
+        completed = subprocess.run(cmd, cwd=str(REPO_ROOT), env=env)
         if completed.returncode != 0:
             failures.append((measurement, completed.returncode))
             message = f"Measurement {measurement} failed with return code {completed.returncode}."
-            if args.continue_on_error:
-                print(message)
-                continue
-            raise RuntimeError(message)
+            if args.stop_on_error:
+                raise RuntimeError(message)
+            print(message)
+            print("Continuing with the next measurement. Use --stop-on-error to fail immediately.")
+            continue
 
     if failures:
-        print("\nFinished with failures:")
+        print("\nFinished with measurement-level failures:")
         for measurement, returncode in failures:
             print(f"  {measurement}: return code {returncode}")
-        raise SystemExit(1)
-
-    print("\nAll requested calibrated dip-fitting runs completed.")
+        print("Batch completed despite failures.")
+    else:
+        print("\nAll requested calibrated dip-fitting runs completed.")
 
 
 if __name__ == "__main__":
