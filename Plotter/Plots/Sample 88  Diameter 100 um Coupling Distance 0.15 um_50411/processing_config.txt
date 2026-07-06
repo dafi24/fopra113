@@ -1,0 +1,29 @@
+structure_measurement: 50411
+structure_file: /home/david/QST_skola/fopra/experiment113/2026-05-07/15/000050411-FoPraWavelengthScan.h5
+calibration_measurement: 50420
+calibration_file: /home/david/QST_skola/fopra/experiment113/2026-05-07/16/000050420-FoPraWavelengthScan.h5
+data_root: /home/david/QST_skola/fopra/experiment113
+prominence: 0.08
+distance: 200
+window_nm: 0.5
+detection_smooth_window: 11
+min_dip_depth_fraction: 0.08
+min_dip_depth_sigma: 5.0
+duplicate_merge_nm: 0.35
+edge_reject_fraction: 0.15
+calibration_smooth_window: 401
+min_calibration_period_factor: 0.75
+max_calibration_period_factor: 4.0
+overview_dpi: 300
+fit_plot_dpi: 200
+
+[mirror_sine_calibration]
+offset: 0.8737387695535155
+amplitude: 0.023172919450857685
+period_nm: 81.00260414637529
+phase: 2.789356303250338
+slope: -0.00035282528750921205
+center_nm: 1569.9999982835673
+smooth_window: 401
+min_period_nm: 74.999267578125
+max_period_nm: 399.99609375
