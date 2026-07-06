@@ -5,14 +5,9 @@ This is a convenience wrapper around ``plotter.py``. It recursively finds all
 calibration scan by default, and launches the calibrated fitting workflow for
 all remaining readable scans in one command.
 
-Typical usage from the repository root or from Plotter/:
-
-    python Plotter/dips_fitting_automatic.py
-    python3 dips_fitting_automatic.py
-
-Run only selected structure scans:
-
-    python Plotter/dips_fitting_automatic.py --measurements 50397 50405 50417
+The script also writes explicit FWHM and local-FSR summary tables after fitting:
+``resonance_summary.csv`` and ``fsr_pairs.csv`` in each measurement output
+folder.
 """
 
 import argparse
@@ -22,6 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from analysis_utils import write_all_resonance_summaries
 from calibration import open_h5_robust
 
 
@@ -135,62 +131,19 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Run calibrated FoPra dip fitting for all readable wavelength-scan HDF5 files."
     )
-    parser.add_argument(
-        "--data-root",
-        default=str(REPO_ROOT),
-        help="Root folder to search recursively for *-FoPraWavelengthScan.h5 files.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="Output folder passed to plotter.py. Defaults to Plotter/Plots.",
-    )
-    parser.add_argument(
-        "--calibration-measurement",
-        default=DEFAULT_CALIBRATION_MEASUREMENT,
-        help="Measurement number of the mirror calibration scan. Defaults to 50420.",
-    )
-    parser.add_argument(
-        "--calibration-file",
-        default=None,
-        help="Direct path to the mirror calibration .h5 file. Overrides --calibration-measurement.",
-    )
-    parser.add_argument(
-        "--measurements",
-        nargs="*",
-        default=None,
-        help="Optional list of structure measurement numbers to fit. If omitted, fit all readable scans except calibration.",
-    )
-    parser.add_argument(
-        "--include-calibration-scan",
-        action="store_true",
-        help="Also run plotter.py on the mirror scan itself. By default it is skipped.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print the plotter.py commands without executing them.",
-    )
-    parser.add_argument(
-        "--stop-on-error",
-        action="store_true",
-        help="Stop the batch when one measurement subprocess fails. By default failures are logged and the batch continues.",
-    )
-    parser.add_argument(
-        "--continue-on-error",
-        action="store_true",
-        help="Deprecated compatibility flag; continuing is now the default.",
-    )
-    parser.add_argument(
-        "--stop-on-fit-error",
-        action="store_true",
-        help="Forward --stop-on-fit-error to plotter.py. By default individual failed peak fits are skipped.",
-    )
-    parser.add_argument(
-        "--keep-existing",
-        action="store_true",
-        help="Forward --keep-existing to plotter.py, so old output folders are not removed first.",
-    )
+    parser.add_argument("--data-root", default=str(REPO_ROOT), help="Root folder to search recursively for wavelength scans.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output folder passed to plotter.py.")
+    parser.add_argument("--calibration-measurement", default=DEFAULT_CALIBRATION_MEASUREMENT, help="Mirror calibration scan number.")
+    parser.add_argument("--calibration-file", default=None, help="Direct path to mirror calibration .h5 file.")
+    parser.add_argument("--measurements", nargs="*", default=None, help="Optional list of structure measurement numbers to fit.")
+    parser.add_argument("--include-calibration-scan", action="store_true", help="Also run plotter.py on the mirror scan itself.")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
+    parser.add_argument("--stop-on-error", action="store_true", help="Stop the batch when one measurement subprocess fails.")
+    parser.add_argument("--continue-on-error", action="store_true", help="Deprecated compatibility flag; continuing is now the default.")
+    parser.add_argument("--stop-on-fit-error", action="store_true", help="Stop a measurement if one individual peak fit fails.")
+    parser.add_argument("--keep-existing", action="store_true", help="Do not remove old output folders first.")
+    parser.add_argument("--skip-resonance-summary", action="store_true", help="Do not write resonance_summary.csv and fsr_pairs.csv after fitting.")
+    parser.add_argument("--ring-length-um", type=float, default=100.0, help="Ring length used for FSR/ng summaries.")
     parser.add_argument("--prominence", type=float, default=0.08)
     parser.add_argument("--distance", type=int, default=200)
     parser.add_argument("--window-nm", type=float, default=0.5)
@@ -216,11 +169,7 @@ def main():
     if not scans:
         raise FileNotFoundError(f"No *-FoPraWavelengthScan.h5 files found below {args.data_root}")
 
-    calibration_path, calibration_measurement = resolve_calibration_file(
-        scans,
-        args.calibration_measurement,
-        args.calibration_file,
-    )
+    calibration_path, calibration_measurement = resolve_calibration_file(scans, args.calibration_measurement, args.calibration_file)
     calibration_ok, calibration_reason = validate_scan(calibration_path)
     if not calibration_ok:
         raise RuntimeError(f"Mirror calibration file is not readable: {calibration_reason}")
@@ -261,7 +210,6 @@ def main():
         print("Command:", " ".join(str(part) for part in cmd))
         if args.dry_run:
             continue
-
         completed = subprocess.run(cmd, cwd=str(REPO_ROOT), env=env)
         if completed.returncode != 0:
             failures.append((measurement, completed.returncode))
@@ -271,6 +219,14 @@ def main():
             print(message)
             print("Continuing with the next measurement. Use --stop-on-error to fail immediately.")
             continue
+
+    if not args.dry_run and not args.skip_resonance_summary:
+        summaries = write_all_resonance_summaries(args.output_dir, ring_length_um=args.ring_length_um, exclude_double=True)
+        ok_count = sum(1 for item in summaries if "error" not in item)
+        print(f"\nWrote explicit FWHM/local-FSR summaries for {ok_count} ParamFile(s).")
+        for item in summaries:
+            if "error" in item:
+                print(f"  Summary failed for {item['param_file']}: {item['error']}")
 
     if failures:
         print("\nFinished with measurement-level failures:")
