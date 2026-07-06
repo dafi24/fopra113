@@ -1,0 +1,8 @@
+FoPra resonator parameter estimation
+plots_dir: /home/david/QST_skola/fopra/experiment113/Plotter/Plots
+ring_length_um: 100.0
+Equations used: FSR=lambda0^2/(ng L), Q=lambda_res/FWHM, finesse=FSR/FWHM, F=pi*sqrt(ra)/(1-ra).
+Double-resonance fits and high-uncertainty/outlier fits are excluded before structure-level calculations.
+neff_reference: 2.6 at 1550.0 nm.
+weakest-coupled reference structure: mple 88  Diameter 100 um Coupling Distance 0.15 um
+alpha_db_per_cm: 2.1345439825608725 +/- 0.5639151920749103
