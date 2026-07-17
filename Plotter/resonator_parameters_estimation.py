@@ -294,6 +294,9 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, sigma_ng_fit, out
             ax.set_ylabel("FSR [nm]")
             ax.set_title(f"Group-index fit\n{plot_structure}")
             ax.legend()
+            fig.tight_layout()
+            fig.savefig(output_dir / f"ng_fit_{plot_name}.png", dpi=args.plot_dpi)
+            plt.close(fig)
 
 
 def process_structure(param_file, args, output_dir):
