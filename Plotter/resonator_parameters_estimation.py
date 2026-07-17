@@ -12,6 +12,7 @@ Run after ``dips_fitting_automatic.py`` has produced ``*_ParamFile.txt`` files:
 import argparse
 import math
 import re
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,7 +20,6 @@ import numpy as np
 from scipy.optimize import curve_fit
 
 from analysis_utils import (
-    C_NM_THZ,
     add_local_fsr_and_finesse,
     find_param_files,
     param_records_to_resonances,
@@ -27,6 +27,13 @@ from analysis_utils import (
     write_all_resonance_summaries,
     write_rows_csv,
 )
+
+
+EXCLUDED_MEASUREMENTS = {
+    "Sample 73 Diameter 100 um Coupling Distance 0.05 um_50413",
+    "Sample 76 Diameter 100 um Coupling Distance 0.09 SECOND MEASUREMENT_50399",
+    "Sample 78 Diameter 100 um Coupling Distance 0.1 um_50401",
+}
 
 
 def finite(value):
@@ -216,28 +223,29 @@ def estimate_neff_from_ng(ng, sigma_ng, wavelengths_nm, neff_reference, neff_ref
 def make_structure_plots(structure, resonances, pairs, ng_fit, output_dir, args):
     output_dir = Path(output_dir)
     plot_name = safe_name(structure)
-    freq = np.array([row["resonance_frequency_thz"] for row in resonances], dtype=float)
+    plot_structure = "\n".join(textwrap.wrap(structure, width=60))
+    wavelength = np.array([row["resonance_wavelength_nm"] for row in resonances], dtype=float)
 
     finesse = np.array([row.get("finesse", np.nan) for row in resonances], dtype=float)
     sigma_finesse = np.array([row.get("sigma_finesse", np.nan) for row in resonances], dtype=float)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.errorbar(freq, finesse, yerr=sigma_finesse, fmt=".", capsize=2)
-    ax.set_xlabel("Resonance frequency [THz]")
+    ax.errorbar(wavelength, finesse, yerr=sigma_finesse, fmt=".", capsize=2)
+    ax.set_xlabel("Resonance wavelength [nm]")
     ax.set_ylabel("Finesse [-]")
-    ax.set_title(f"Finesse vs resonance frequency\n{structure}")
+    ax.set_title(f"Finesse vs resonance wavelength\n{plot_structure}")
     fig.tight_layout()
-    fig.savefig(output_dir / f"finesse_vs_frequency_{plot_name}.png", dpi=args.plot_dpi)
+    fig.savefig(output_dir / f"finesse_vs_wavelength_{plot_name}.png", dpi=args.plot_dpi)
     plt.close(fig)
 
     q = np.array([row.get("Q", np.nan) for row in resonances], dtype=float)
     sigma_q = np.array([row.get("sigma_Q", np.nan) for row in resonances], dtype=float)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.errorbar(freq, q, yerr=sigma_q, fmt=".", capsize=2)
-    ax.set_xlabel("Resonance frequency [THz]")
+    ax.errorbar(wavelength, q, yerr=sigma_q, fmt=".", capsize=2)
+    ax.set_xlabel("Resonance wavelength [nm]")
     ax.set_ylabel("Loaded quality factor Q [-]")
-    ax.set_title(f"Q vs resonance frequency\n{structure}")
+    ax.set_title(f"Q vs resonance wavelength\n{plot_structure}")
     fig.tight_layout()
-    fig.savefig(output_dir / f"Q_vs_frequency_{plot_name}.png", dpi=args.plot_dpi)
+    fig.savefig(output_dir / f"Q_vs_wavelength_{plot_name}.png", dpi=args.plot_dpi)
     plt.close(fig)
 
     finite_finesse = finesse[np.isfinite(finesse)]
@@ -246,27 +254,38 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, output_dir, args)
         ax.hist(finite_finesse, bins="auto")
         ax.set_xlabel("Finesse [-]")
         ax.set_ylabel("Count")
-        ax.set_title(f"Finesse histogram\n{structure}")
+        ax.set_title(f"Finesse histogram\n{plot_structure}")
         fig.tight_layout()
         fig.savefig(output_dir / f"finesse_histogram_{plot_name}.png", dpi=args.plot_dpi)
         plt.close(fig)
 
-    if pairs and finite(ng_fit):
+    if pairs:
         lambda0 = np.array([row["center_wavelength_nm"] for row in pairs], dtype=float)
         fsr = np.array([row["fsr_nm"] for row in pairs], dtype=float)
         sigma_fsr = np.array([row["sigma_fsr_nm"] for row in pairs], dtype=float)
-        xfit = np.linspace(np.nanmin(lambda0), np.nanmax(lambda0), 300)
-        yfit = xfit ** 2 / (ng_fit * args.ring_length_um * 1000.0)
+
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.errorbar(lambda0, fsr, yerr=sigma_fsr, fmt=".", capsize=2, label="Neighboring-dip FSR")
-        ax.plot(xfit, yfit, label=f"Eq. 5 fit: ng={ng_fit:.4g}")
+        ax.errorbar(lambda0, fsr, yerr=sigma_fsr, fmt=".", capsize=2)
         ax.set_xlabel("Pair center wavelength lambda0 [nm]")
         ax.set_ylabel("FSR [nm]")
-        ax.set_title(f"Group-index fit\n{structure}")
-        ax.legend()
+        ax.set_title(f"FSR vs wavelength\n{plot_structure}")
         fig.tight_layout()
-        fig.savefig(output_dir / f"ng_fit_{plot_name}.png", dpi=args.plot_dpi)
+        fig.savefig(output_dir / f"FSR_vs_wavelength_{plot_name}.png", dpi=args.plot_dpi)
         plt.close(fig)
+
+        if finite(ng_fit):
+            xfit = np.linspace(np.nanmin(lambda0), np.nanmax(lambda0), 300)
+            yfit = xfit ** 2 / (ng_fit * args.ring_length_um * 1000.0)
+            fig, ax = plt.subplots(figsize=(7, 4))
+            ax.errorbar(lambda0, fsr, yerr=sigma_fsr, fmt=".", capsize=2, label="Neighboring-dip FSR")
+            ax.plot(xfit, yfit, label=f"Eq. 5 fit: ng={ng_fit:.4g}")
+            ax.set_xlabel("Pair center wavelength lambda0 [nm]")
+            ax.set_ylabel("FSR [nm]")
+            ax.set_title(f"Group-index fit\n{plot_structure}")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(output_dir / f"ng_fit_{plot_name}.png", dpi=args.plot_dpi)
+            plt.close(fig)
 
 
 def process_structure(param_file, args, output_dir):
@@ -449,6 +468,8 @@ def main():
     all_clean_pairs = []
     all_rejected = []
     for param_file in find_param_files(plots_dir):
+        if any(measurement in str(param_file) for measurement in EXCLUDED_MEASUREMENTS):
+            continue
         result = process_structure(param_file, args, per_structure_dir)
         summary, clean_resonances, clean_pairs, rejected = result
         all_rejected.extend(rejected)
