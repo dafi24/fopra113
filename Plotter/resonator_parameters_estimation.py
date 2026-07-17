@@ -294,6 +294,7 @@ def process_structure(param_file, args, output_dir):
     with_fsr, pairs = add_local_fsr_and_finesse(filtered, ring_length_um=args.ring_length_um)
     with_fsr, fsr_rejected = filter_after_fsr(with_fsr, args)
     with_fsr, pairs = add_local_fsr_and_finesse(with_fsr, ring_length_um=args.ring_length_um)
+    pairs = [pair for pair in pairs if 1.7 <= safe_float(pair.get("fsr_nm")) <= 2.2]
     rejected.extend(fsr_rejected)
 
     if not with_fsr:
