@@ -220,7 +220,7 @@ def estimate_neff_from_ng(ng, sigma_ng, wavelengths_nm, neff_reference, neff_ref
     return neff, sigma
 
 
-def make_structure_plots(structure, resonances, pairs, ng_fit, output_dir, args):
+def make_structure_plots(structure, resonances, pairs, ng_fit, sigma_ng_fit, output_dir, args):
     output_dir = Path(output_dir)
     plot_name = safe_name(structure)
     plot_structure = "\n".join(textwrap.wrap(structure, width=60))
@@ -277,15 +277,23 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, output_dir, args)
             xfit = np.linspace(np.nanmin(lambda0), np.nanmax(lambda0), 300)
             yfit = xfit ** 2 / (ng_fit * args.ring_length_um * 1000.0)
             fig, ax = plt.subplots(figsize=(7, 4))
-            ax.errorbar(lambda0, fsr, yerr=sigma_fsr, fmt=".", capsize=2, label="Neighboring-dip FSR")
-            ax.plot(xfit, yfit, label=f"Eq. 5 fit: ng={ng_fit:.4g}")
+            ax.errorbar(
+                lambda0,
+                fsr,
+                yerr=sigma_fsr,
+                fmt=".",
+                capsize=2,
+                label="Neighboring-dip FSR",
+            )
+            ax.plot(
+                xfit,
+                yfit,
+                label=fr"Eq. 5 fit: $n_g={ng_fit:.4g}\pm{sigma_ng_fit:.2g}$",
+            )
             ax.set_xlabel("Pair center wavelength lambda0 [nm]")
             ax.set_ylabel("FSR [nm]")
             ax.set_title(f"Group-index fit\n{plot_structure}")
             ax.legend()
-            fig.tight_layout()
-            fig.savefig(output_dir / f"ng_fit_{plot_name}.png", dpi=args.plot_dpi)
-            plt.close(fig)
 
 
 def process_structure(param_file, args, output_dir):
@@ -315,7 +323,7 @@ def process_structure(param_file, args, output_dir):
         pair["ng_fit"] = ng_fit
         pair["sigma_ng_fit"] = sigma_ng_fit
 
-    make_structure_plots(structure, with_fsr, pairs, ng_fit, output_dir, args)
+    make_structure_plots(structure,with_fsr,pairs,ng_fit,sigma_ng_fit,output_dir,args)
 
     q_mean, q_std, q_sem, q_n = mean_std_sem([row.get("Q") for row in with_fsr])
     finesse_mean, finesse_std, finesse_sem, finesse_n = mean_std_sem([row.get("finesse") for row in with_fsr])
