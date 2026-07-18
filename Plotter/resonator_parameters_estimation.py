@@ -251,15 +251,31 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, sigma_ng_fit, out
     finite_finesse = finesse[np.isfinite(finesse) & (finesse > 0)]
     if finite_finesse.size:
         fig, ax = plt.subplots(figsize=(7, 4))
-        counts, bin_edges, _ = ax.hist(finite_finesse, bins=20)
+        counts, bin_edges, _ = ax.hist(
+            finite_finesse,
+            bins=20,
+            label="Data",
+        )
 
         bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        bin_width = np.diff(bin_edges)
+        bin_width = float(np.mean(np.diff(bin_edges)))
 
-        def log_normal(finesse_value, m, s):
+        log_finesse = np.log(finite_finesse)
+
+        # Maximum-likelihood estimates provide stable initial parameters.
+        m_initial = float(np.mean(log_finesse))
+        s_initial = float(np.std(log_finesse, ddof=0))
+
+        if not np.isfinite(s_initial) or s_initial <= 0:
+            s_initial = 0.1
+
+        # The normalization converts the log-normal probability density
+        # into expected histogram counts.
+        histogram_normalization = finite_finesse.size * bin_width
+
+        def log_normal_counts(finesse_value, m, s):
             return (
-                finite_finesse.size
-                * bin_width
+                histogram_normalization
                 / (finesse_value * s * np.sqrt(2.0 * np.pi))
                 * np.exp(
                     -(np.log(finesse_value) - m) ** 2
@@ -267,40 +283,107 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, sigma_ng_fit, out
                 )
             )
 
+        # Restrict the fit to the range supported by the measured data.
+        m_lower = float(np.min(log_finesse))
+        m_upper = float(np.max(log_finesse))
+
+        # Avoid identical bounds for structures containing equal values.
+        if m_upper <= m_lower:
+            m_lower = m_initial - 0.5
+            m_upper = m_initial + 0.5
+
+        log_range = m_upper - m_lower
+        s_lower = 1e-4
+        s_upper = max(2.0 * log_range, 2.0 * s_initial, 0.1)
+
+        fit_mask = (
+            np.isfinite(bin_centers)
+            & np.isfinite(counts)
+            & (bin_centers > 0)
+        )
+        xdata = bin_centers[fit_mask]
+        ydata = counts[fit_mask]
+
+        # Poisson-like uncertainties for histogram counts.
+        count_sigma = np.sqrt(ydata + 1.0)
+
+        fit_succeeded = False
+
         try:
-            fit_mask = (counts > 0) & (bin_centers > 0)
             popt, pcov = curve_fit(
-                log_normal,
-                bin_centers[fit_mask],
-                counts[fit_mask],
+                log_normal_counts,
+                xdata,
+                ydata,
                 p0=[
-                    float(np.mean(np.log(finite_finesse))),
-                    float(np.std(np.log(finite_finesse))),
+                    np.clip(m_initial, m_lower, m_upper),
+                    np.clip(s_initial, s_lower, s_upper),
                 ],
-                bounds=([-np.inf, 0.0], [np.inf, np.inf]),
-                maxfev=10000,
+                sigma=count_sigma,
+                absolute_sigma=True,
+                bounds=(
+                    [m_lower, s_lower],
+                    [m_upper, s_upper],
+                ),
+                max_nfev=50000,
             )
 
             m_fit, s_fit = popt
             sigma_m, sigma_s = np.sqrt(np.diag(pcov))
 
-            xfit = np.linspace(bin_edges[0], bin_edges[-1], 500)
-            ax.plot(
-                xfit,
-                log_normal(xfit, m_fit, s_fit),
-                label=(
-                    fr"Log-normal fit: "
-                    fr"$m={m_fit:.3g}\pm{sigma_m:.2g}$, "
-                    fr"$s={s_fit:.3g}\pm{sigma_s:.2g}$"
-                ),
+            fit_succeeded = (
+                np.isfinite(m_fit)
+                and np.isfinite(s_fit)
+                and np.isfinite(sigma_m)
+                and np.isfinite(sigma_s)
+                and m_lower <= m_fit <= m_upper
+                and s_lower < s_fit < s_upper
             )
-            ax.legend()
-        except (RuntimeError, ValueError):
-            pass
+
+        except (
+            RuntimeError,
+            ValueError,
+            TypeError,
+            np.linalg.LinAlgError,
+        ):
+            fit_succeeded = False
+
+        if not fit_succeeded:
+            # Stable maximum-likelihood fallback using the raw finesse data.
+            m_fit = m_initial
+            s_fit = s_initial
+
+            # Approximate standard errors of the log-normal MLE parameters.
+            sigma_m = s_fit / np.sqrt(finite_finesse.size)
+            sigma_s = (
+                s_fit
+                / np.sqrt(2.0 * finite_finesse.size)
+            )
+
+            print(
+                f"Using direct log-normal estimates for finesse "
+                f"histogram of {structure}."
+            )
+
+        xfit = np.linspace(
+            max(bin_edges[0], np.finfo(float).tiny),
+            bin_edges[-1],
+            500,
+        )
+
+        ax.plot(
+            xfit,
+            log_normal_counts(xfit, m_fit, s_fit),
+            label=(
+                fr"Log-normal fit: "
+                fr"$m={m_fit:.3g}\pm{sigma_m:.2g}$, "
+                fr"$s={s_fit:.3g}\pm{sigma_s:.2g}$"
+            ),
+        )
 
         ax.set_xlabel("Finesse [-]")
         ax.set_ylabel("Count")
         ax.set_title(f"Finesse histogram\n{plot_structure}")
+        ax.legend()
         fig.tight_layout()
         fig.savefig(
             output_dir / f"finesse_histogram_{plot_name}.png",
