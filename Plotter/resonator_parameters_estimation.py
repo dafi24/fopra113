@@ -248,15 +248,64 @@ def make_structure_plots(structure, resonances, pairs, ng_fit, sigma_ng_fit, out
     fig.savefig(output_dir / f"Q_vs_wavelength_{plot_name}.png", dpi=args.plot_dpi)
     plt.close(fig)
 
-    finite_finesse = finesse[np.isfinite(finesse)]
+    finite_finesse = finesse[np.isfinite(finesse) & (finesse > 0)]
     if finite_finesse.size:
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.hist(finite_finesse, bins="auto")
+        counts, bin_edges, _ = ax.hist(finite_finesse, bins=20)
+
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        bin_width = np.diff(bin_edges)
+
+        def log_normal(finesse_value, m, s):
+            return (
+                finite_finesse.size
+                * bin_width
+                / (finesse_value * s * np.sqrt(2.0 * np.pi))
+                * np.exp(
+                    -(np.log(finesse_value) - m) ** 2
+                    / (2.0 * s ** 2)
+                )
+            )
+
+        try:
+            fit_mask = (counts > 0) & (bin_centers > 0)
+            popt, pcov = curve_fit(
+                log_normal,
+                bin_centers[fit_mask],
+                counts[fit_mask],
+                p0=[
+                    float(np.mean(np.log(finite_finesse))),
+                    float(np.std(np.log(finite_finesse))),
+                ],
+                bounds=([-np.inf, 0.0], [np.inf, np.inf]),
+                maxfev=10000,
+            )
+
+            m_fit, s_fit = popt
+            sigma_m, sigma_s = np.sqrt(np.diag(pcov))
+
+            xfit = np.linspace(bin_edges[0], bin_edges[-1], 500)
+            ax.plot(
+                xfit,
+                log_normal(xfit, m_fit, s_fit),
+                label=(
+                    fr"Log-normal fit: "
+                    fr"$m={m_fit:.3g}\pm{sigma_m:.2g}$, "
+                    fr"$s={s_fit:.3g}\pm{sigma_s:.2g}$"
+                ),
+            )
+            ax.legend()
+        except (RuntimeError, ValueError):
+            pass
+
         ax.set_xlabel("Finesse [-]")
         ax.set_ylabel("Count")
         ax.set_title(f"Finesse histogram\n{plot_structure}")
         fig.tight_layout()
-        fig.savefig(output_dir / f"finesse_histogram_{plot_name}.png", dpi=args.plot_dpi)
+        fig.savefig(
+            output_dir / f"finesse_histogram_{plot_name}.png",
+            dpi=args.plot_dpi,
+        )
         plt.close(fig)
 
     if pairs:
