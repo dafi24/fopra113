@@ -568,13 +568,38 @@ def make_comparison_plots(coupling_rows, output_dir, args):
     fig.savefig(output_dir / "finesse_vs_coupling_distance.png", dpi=args.plot_dpi)
     plt.close(fig)
 
-    k = np.array([row.get("cross_coupling_k", np.nan) for row in coupling_rows], dtype=float)
-    kerr = np.array([row.get("sigma_cross_coupling_k", np.nan) for row in coupling_rows], dtype=float)
+    plot_rows = [
+        row for row in coupling_rows
+        if not (row["structure"].startswith("mple 73") and "SECOND MEASUREMENT" in row["structure"])
+        and not (
+            row["structure"].startswith("mple 76")
+            and not ("SECOND MEASUREMENT" in row["structure"])
+        )
+    ]
+
+    dist = np.array([row["coupling_distance_um"] for row in plot_rows], dtype=float)
+    k = np.array([row.get("cross_coupling_k", np.nan) for row in plot_rows], dtype=float)
+    kerr = np.array([row.get("sigma_cross_coupling_k", np.nan) for row in plot_rows], dtype=float)
+    order = np.argsort(dist)
+
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.errorbar(dist[order], k[order], yerr=kerr[order], fmt=".", capsize=2)
+    for i in order:
+        sample_match = re.match(r"Sample\s+\d+", plot_rows[i]["structure"])
+        #print(plot_rows[i]["structure"])
+        sample_label = "Sample " + plot_rows[i]["structure"][5:7]#sample_match.group(0) if sample_match else plot_rows[i]["structure"]
+        ax.errorbar(
+            dist[i],
+            k[i],
+            yerr=kerr[i],
+            fmt=".",
+            capsize=2,
+            label=sample_label,
+        )
+
     ax.set_xlabel("Coupling distance [um]")
     ax.set_ylabel("Estimated cross-coupling k [-]")
     ax.set_title("Estimated ring-bus coupling vs coupling distance")
+    ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(output_dir / "k_vs_coupling_distance.png", dpi=args.plot_dpi)
     plt.close(fig)
